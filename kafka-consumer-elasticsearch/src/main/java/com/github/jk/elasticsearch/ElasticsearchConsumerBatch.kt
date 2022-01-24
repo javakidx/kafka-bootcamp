@@ -4,7 +4,7 @@ import com.github.jk.elasticsearch.ComponentFactory.createClient
 import com.github.jk.elasticsearch.ComponentFactory.createKafkaConsumer
 import com.google.gson.JsonParser
 import org.apache.kafka.clients.consumer.ConsumerRecords
-import org.elasticsearch.ElasticsearchStatusException
+import org.elasticsearch.action.bulk.BulkRequest
 import org.elasticsearch.action.index.IndexRequest
 import org.elasticsearch.client.RequestOptions
 import org.elasticsearch.common.xcontent.XContentType
@@ -12,34 +12,38 @@ import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 
-object ElasticsearchConsumer {
+object ElasticsearchConsumerBatch {
     private val LOGGER = LoggerFactory.getLogger(ElasticsearchConsumer::class.java)
 
     fun run() {
         val client = createClient()
 
-        val kafkaConsumer = createKafkaConsumer("twitter_tweets", 10)
-
-        var count = 0
+        val kafkaConsumer = createKafkaConsumer("twitter_tweets", 100)
 
         while(true) {
             val messages: ConsumerRecords<String, String> = kafkaConsumer.poll(Duration.ofMillis(100))
             LOGGER.info("Received ${messages.count()} records")
-            count += messages.count()
+            val count = messages.count()
 
-            if (count <= 10 ) {
+            if (count <= 0) {
                 continue
             }
+
+            val bulkRequest = BulkRequest()
+
             for (message in messages) {
-                val id = getIdFromTweet(message.value())
-                val indexRequest = IndexRequest("twitter", "tweets", id).source(message.value(), XContentType.JSON)
-                try {
-                    val response = client.index(indexRequest, RequestOptions.DEFAULT)
-                    LOGGER.info(String.format("Document indexed, id: %s", response.id))
-                } catch (e: ElasticsearchStatusException) {
-                    LOGGER.error("Failed to index message: $message")
+                val id = try {
+                    getIdFromTweet(message.value())
+                } catch (e: NullPointerException) {
+                    LOGGER.error("Failed to get id, message: ${message.value()}")
                 }
+                val indexRequest = IndexRequest("twitter", "tweets", id as String?).source(message.value(), XContentType.JSON)
+                bulkRequest.add(indexRequest)
+
+                LOGGER.info("Document added to bulk, id: $id")
             }
+            client.bulk(bulkRequest, RequestOptions.DEFAULT)
+
             TimeUnit.MILLISECONDS.sleep(10)
             LOGGER.info("Committing offsets...")
             kafkaConsumer.commitAsync()
@@ -64,5 +68,5 @@ object ElasticsearchConsumer {
 }
 
 fun main() {
-    ElasticsearchConsumer.run()
+    ElasticsearchConsumerBatch.run()
 }
